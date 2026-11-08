@@ -14,9 +14,21 @@ if [ $# -ge 1 ] && [ -f "$1" ]; then
   shift
 fi
 if [ -z "$APK" ]; then
-  echo "把 APK 文件拖到这个窗口里，或直接输入路径："
-  read -r -p "APK 路径: " APK
-  APK="${APK#\'}"; APK="${APK%\'}"
+  echo "已为你准备好以下配套 APK（位于 artifacts/ 目录）："
+  echo "  [1] DiPlay-0.2.22.apk          (默认：开源无线 CarPlay 接收端)"
+  echo "  [2] MT-Manager.apk             (MT管理器：打开隐藏应用 / 管理车机文件)"
+  echo "  [3] DiscreetLauncher-7.8.4.apk (轻量悬浮抽屉：方便在车机随时呼出第三方应用)"
+  echo "  [4] MaterialFiles-1.7.5.apk    (开源文件管理器)"
+  echo ""
+  read -r -p "输入序号 [1-4]（直接按回车默认选 1），或拖入其他 APK 路径: " CHOICE
+  CHOICE="${CHOICE#\'}"; CHOICE="${CHOICE%\'}"
+  case "${CHOICE:-1}" in
+    1) APK="artifacts/DiPlay-0.2.22.apk" ;;
+    2) APK="artifacts/MT-Manager.apk" ;;
+    3) APK="artifacts/DiscreetLauncher-7.8.4.apk" ;;
+    4) APK="artifacts/MaterialFiles-1.7.5.apk" ;;
+    *) APK="$CHOICE" ;;
+  esac
 fi
 if [ ! -f "$APK" ]; then
   echo "找不到 APK：$APK"

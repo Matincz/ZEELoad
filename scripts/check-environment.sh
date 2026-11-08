@@ -11,7 +11,7 @@ elif [ -x "$BASE/venv/bin/mitmdump" ]; then
 else
   MITMDUMP=$(command -v mitmdump 2>/dev/null || echo mitmdump)
 fi
-PORT=${ZEEKR_PORT:-18080}
+PORT=${ZEEKR_PORT:-18081}
 DOMAINS=${ZEEKR_DOMAINS:-"snc-api-gw.zeekrlife.com snc-download-cdn.zeekrlife.com"}
 
 # 自动探测：共享接口（bridge*）与车机（DHCP 租约按名称识别）
