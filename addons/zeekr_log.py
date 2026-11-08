@@ -51,6 +51,9 @@ REQ_HEADER_KEYS = (
     "range",
     "referer",
     "x-request-id",
+    "x-app-version",
+    "x-app-id",
+    "x-env-type",
 )
 
 
@@ -111,8 +114,48 @@ class ZeekrLog:
             "zeekr_fake_sign",
             bool,
             False,
-            "调试用：把 /app/signature 响应里的 sign 换成等长随机值，用于验证 sign 是否被校验",
+            "（旧开关）把 /app/signature 响应里已有的 sign 换成等长随机值",
         )
+        loader.add_option(
+            "zeekr_sign_mode",
+            str,
+            "off",
+            "改写 /app/signature 响应（含 sign:null）：off | nonempty（非空随机）| "
+            "pkg（复用同包真签名）| any（复用任意真签名）| literal（用 zeekr_sign_value）",
+        )
+        loader.add_option("zeekr_sign_value", str, "", "字面 sign（base64），配合 zeekr_sign_mode=literal")
+        loader.add_option("zeekr_sign_len", int, 344, "nonempty 模式下伪造 sign 的长度（官方签名是 344 字符 base64）")
+        loader.add_option(
+            "zeekr_sign_type",
+            int,
+            -1,
+            "改写签名响应里的 signType（-1 保持不动）；用来试服务端/商店对其它 signType 的处理",
+        )
+        loader.add_option(
+            "zeekr_sign_cache",
+            str,
+            "",
+            "真签名缓存 JSON（默认 <zeekr_out>/sign-cache.json）；看到服务端给了真签名就记下来，之后可回放",
+        )
+        loader.add_option(
+            "zeekr_hash_fields",
+            str,
+            "both",
+            "注入元数据时改哪些哈希字段：both | sha256 | md5（用来分辨「内容校验用哪个、签名校验用哪个」）",
+        )
+        loader.add_option(
+            "zeekr_patch_fields",
+            str,
+            "",
+            "注入时对每条元数据额外覆写的字段（JSON），例如 '\"publishType\":1,\"devType\":1,\"supportUninstall\":1'",
+        )
+        loader.add_option(
+            "zeekr_launch_activity",
+            str,
+            "",
+            "把 launcherActivities 改成任意组件（如 com.android.settings/.Settings），试商店「打开」是否照抄服务端的组件名",
+        )
+        loader.add_option("zeekr_log_req_body", bool, True, "把 JSON 请求体也写进 requests.jsonl（排障用）")
         loader.add_option(
             "zeekr_corrupt_offset",
             int,
@@ -125,6 +168,19 @@ class ZeekrLog:
             DEFAULT_BODY_LIMIT,
             "单个响应体保存上限（字节）；超过则只记录元数据并原样流式转发",
         )
+
+    UPSTREAM_IPS = {
+        "snc-api-gw.zeekrlife.com": "120.26.64.144",
+        "snc-download-cdn.zeekrlife.com": "122.228.15.33",
+    }
+
+    def server_connect(self, data) -> None:
+        if data.server.address:
+            host, port = data.server.address
+            if host in self.UPSTREAM_IPS:
+                if not data.server.sni:
+                    data.server.sni = host
+                data.server.address = (self.UPSTREAM_IPS[host], port)
 
     def running(self) -> None:
         self._open()
@@ -275,6 +331,10 @@ class ZeekrLog:
             "req_headers": self._pick(req.headers, REQ_HEADER_KEYS),
         }
         if resp is not None:
+            if bool(ctx.options.zeekr_log_req_body) and "json" in (req.headers.get("content-type") or "").lower():
+                body = req.get_text(strict=False) or ""
+                if body:
+                    rec["req_body"] = body[:1200]
             if "/app/signature" in req.path:
                 body = req.get_text(strict=False) or ""
                 try:
@@ -305,13 +365,117 @@ class ZeekrLog:
 
     # ---- 内部 ----
 
+    def _sign_cache_path(self) -> str:
+        p = ctx.options.zeekr_sign_cache or ""
+        if p:
+            return os.path.expanduser(p)
+        out = ctx.options.zeekr_out
+        return os.path.join(out, "sign-cache.json") if out else ""
+
+    def _patch_signature(self, flow: http.HTTPFlow, txt: str) -> tuple[str, str | None]:
+        """记录服务端给过的真签名；并按 zeekr_sign_mode / zeekr_sign_type 改写响应。
+
+        关键点：官方对不认识的哈希返回 "sign":null，所以改写必须同时兼容 null 和字符串。
+        """
+        mode = (ctx.options.zeekr_sign_mode or "off").strip().lower()
+        stype = int(ctx.options.zeekr_sign_type)
+        try:
+            req = json.loads(flow.request.get_text(strict=False) or "{}")
+        except Exception:
+            req = {}
+        pkg = req.get("packageName") or ""
+        sha = (req.get("apkSha256") or "").lower()
+        ver = req.get("apkVersion")
+
+        m = re.search(r'"sign"\s*:\s*(?:null|"([^"]*)")', txt)
+        if not m:
+            return txt, None
+        server_sign = m.group(1)
+        if server_sign:  # 服务端认了这个哈希，给了真签名 -> 存下来备用
+            cache = _load_sign_cache(self._sign_cache_path())
+            entry = {
+                "sign": server_sign,
+                "signType": req.get("signType", 0),
+                "packageName": pkg,
+                "apkVersion": ver,
+                "apkSha256": sha,
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            }
+            cache.setdefault(pkg, {})[str(ver)] = entry
+            cache.setdefault("__by_sha__", {})[sha] = entry
+            if not cache.get("__any__"):
+                cache["__any__"] = entry
+            _save_sign_cache(self._sign_cache_path(), cache)
+            ctx.log.warn(f"zeekr_log: [sign-cache] 收到 {pkg} v{ver} 的真签名，已缓存可回放")
+
+        if mode == "off" and stype < 0:
+            return txt, None
+
+        repl = None
+        if mode != "off":
+            cache = _load_sign_cache(self._sign_cache_path())
+            if mode == "literal":
+                repl = (ctx.options.zeekr_sign_value or "").strip()
+                if repl.startswith("file://"):
+                    raw = _read_file_cached(repl[7:].strip())
+                    repl = raw.decode().strip() if raw else ""
+            elif mode in ("pkg", "any"):
+                got = None
+                if mode == "pkg":
+                    for entry in (cache.get(pkg) or {}).values():
+                        got = entry["sign"]
+                else:
+                    got = (cache.get("__any__") or {}).get("sign")
+                repl = got or ""
+            elif mode == "nonempty":
+                import secrets
+
+                n = int(ctx.options.zeekr_sign_len) or 344
+                repl = base64.b64encode(secrets.token_bytes((n * 3) // 4)).decode()[:n]
+            else:
+                ctx.log.warn(f"zeekr_log: [sign] 未知 zeekr_sign_mode={mode}，按原样透传")
+                repl = None
+            if not repl:
+                ctx.log.warn(
+                    f"zeekr_log: [sign] mode={mode} 没拿到可用签名（缓存为空？），按原样透传；"
+                    "可先让商店打开一个官方应用的详情页喂一次真签名，或用 scripts/sign-oracle.py 现场签"
+                )
+                return txt, None
+        else:  # 只改 signType
+            repl = server_sign or "null"
+
+        quoted = "null" if repl == "null" else '"' + repl.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        # 直接重建整个 "sign":<值> 片段，避免引号转义踩坑
+        head, tail = txt[: m.start()], txt[m.end() :]
+        out = head + '"sign":' + quoted + tail
+        changed = out != txt
+        if stype >= 0:
+            out2 = re.sub(r'("signType"\s*:\s*)-?\d+', lambda mm: mm.group(1) + str(stype), out)
+            changed = changed or out2 != out
+            out = out2
+        if not changed:
+            return txt, None
+        ctx.log.warn(
+            f"zeekr_log: [sign] {pkg} v{ver} 服务端返回 "
+            f"{'真签名' if server_sign else 'null'} -> 改写为 mode={mode}"
+            + (f", signType={stype}" if stype >= 0 else "")
+        )
+        return out, "sign_rewritten_" + mode
+
     def _rewrite_body(self, flow: http.HTTPFlow, resp) -> dict | None:
         """在 response 阶段做等长改写（小 JSON 响应）。"""
         want_hash = ctx.options.zeekr_fake_hash
         want_sign = ctx.options.zeekr_fake_sign
         override_sha = (ctx.options.zeekr_override_sha256 or "").strip().lower()
         override_md5 = (ctx.options.zeekr_override_md5 or "").strip().lower()
-        if not want_hash and not want_sign and not override_sha and not override_md5:
+        sign_busy = (
+            (ctx.options.zeekr_sign_mode or "off").strip().lower() != "off"
+            or int(ctx.options.zeekr_sign_type) >= 0
+        )
+        meta_busy = bool(
+            (ctx.options.zeekr_launch_activity or "") or _patch_fields(ctx.options.zeekr_patch_fields)
+        )
+        if not want_hash and not want_sign and not override_sha and not override_md5 and not sign_busy and not meta_busy:
             return None
         if resp.stream:
             return None
@@ -351,7 +515,16 @@ class ZeekrLog:
             if rp:
                 data = _read_file_cached(rp)
                 size = len(data) if data else None
-            out, injected, urls = _inject_update(out, inject_pkg, override_sha, override_md5, size)
+            out, injected, urls = _inject_update(
+                out,
+                inject_pkg,
+                override_sha,
+                override_md5,
+                size,
+                (ctx.options.zeekr_hash_fields or "both").strip().lower(),
+                _patch_fields(ctx.options.zeekr_patch_fields),
+                ctx.options.zeekr_launch_activity or "",
+            )
             if injected:
                 info["update_injected"] = inject_pkg
                 now = time.time()
@@ -361,6 +534,10 @@ class ZeekrLog:
                     f"zeekr_log: [inject-update] 已为 {inject_pkg} 注入新版本（{len(urls)} 个下载地址已武装）"
                 )
 
+        if "/app/signature" in flow.request.path:
+            out, note = self._patch_signature(flow, out)
+            if note:
+                info[note] = True
         if want_sign and "/app/signature" in flow.request.path:
             out2 = re.sub(r'("sign"\s*:\s*")[^"]{20,}(")', _fake_sign, out)
             if out2 != out:
@@ -439,6 +616,10 @@ class ZeekrLog:
                 else f"大响应体（{declared} 字节）已流式转发，不落盘"
             )
             return {"body_saved": False, "body_note": note, "is_apk_guess": is_apk}
+        # 商店的目录/列表类 JSON（分类页、搜索结果）可能超过默认上限，
+        # 但它们是我们找「目录里已收录包名」的原料，放宽到 8 MiB 照单全收。
+        if "json" in ctype and (declared_len is None or declared_len <= 8 * 1024 * 1024):
+            limit = max(limit, 8 * 1024 * 1024)
         if declared_len is not None and declared_len > limit:
             return {
                 "body_saved": False,
@@ -501,8 +682,47 @@ def _read_file_cached(path: str):
     return _FILE_CACHE[path]
 
 
-def _inject_update(txt: str, pkg: str, sha: str, md5: str, size_bytes):
-    """把 appList 里指定已安装包的条目改成「有大版本更新」，指向替换包。"""
+def _patch_fields(spec: str):
+    """解析 zeekr_patch_fields（允许省略外层花括号）。"""
+    spec = (spec or "").strip()
+    if not spec:
+        return {}
+    try:
+        obj = json.loads(spec if spec.startswith("{") else "{" + spec + "}")
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        ctx.log.warn(f"zeekr_log: zeekr_patch_fields 不是合法 JSON，已忽略：{spec}")
+        return {}
+
+
+def _load_sign_cache(path: str) -> dict:
+    if not path:
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _save_sign_cache(path: str, data: dict) -> None:
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=1)
+    except Exception as exc:
+        ctx.log.warn(f"zeekr_log: 签名缓存写入失败: {exc}")
+
+
+def _inject_update(txt: str, pkg: str, sha: str, md5: str, size_bytes, hash_fields="both", patch=None, launch=""):
+    """把 appList / detail 里指定已安装包的条目改成「有大版本更新」，指向替换包。
+
+    hash_fields 用来做「内容校验到底比哪个字段」的分辨实验：both | sha256 | md5。
+    """
+    hash_fields = (hash_fields or "both").strip().lower()
+    patch = dict(patch or {})
     try:
         doc = json.loads(txt)
     except Exception:
@@ -527,13 +747,16 @@ def _inject_update(txt: str, pkg: str, sha: str, md5: str, size_bytes):
         ver = 1800000000 + (int(sha[:7], 16) % 300000000) if len(sha) == 64 else 1999999999
         e["apkVersion"] = ver
         e["apkVersionName"] = f"9.9.{ver % 1000}"
-        if len(sha) == 64:
+        if len(sha) == 64 and hash_fields in ("both", "sha256"):
             e["sha256"] = sha
-        if len(md5) == 32:
+        if len(md5) == 32 and hash_fields in ("both", "md5"):
             e["apkMd5"] = md5
         if size_bytes:
             e["apkSize"] = round(size_bytes / 1048576, 2)
         e["apkSign"] = "sign"
+        if launch:
+            e["launcherActivities"] = launch
+        e.update(patch)
         found = True
         u = e.get("apkUrl") or ""
         if u:
