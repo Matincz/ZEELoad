@@ -41,6 +41,11 @@ def parse_args(argv=None):
     exp.add_argument("--hash-fields", default="both", choices=["both", "sha256", "md5"], help="只改哪个哈希字段")
     exp.add_argument("--patch", default="", help="额外覆写元数据字段（JSON 片段），例：\"publishType\":1,\"devType\":1")
     exp.add_argument("--launch-activity", default="", help="把 launcherActivities 改成任意组件（试「打开」按钮）")
+    exp.add_argument(
+        "--sign-cache",
+        default="",
+        help="真签名缓存文件（跳轮复用）。不指定的话缓存开在当轮目录里，重启服务就丢了",
+    )
     ap.add_argument("--quiet", action="store_true", help="不保存 flows.mitm（省磁盘）")
     return ap.parse_args(argv)
 
@@ -170,6 +175,8 @@ def main() -> None:
     ]
     if args.sign_value:
         sets.append(f"zeekr_sign_value={args.sign_value}")
+    if args.sign_cache:
+        sets.append(f"zeekr_sign_cache={args.sign_cache}")
     if args.patch:
         sets.append(f"zeekr_patch_fields={args.patch}")
     cmd = [MITMDUMP, "--mode", "regular", "--emudhra", "--listen-host", "127.0.0.1",
@@ -187,6 +194,8 @@ def main() -> None:
         print(f"[LAN-ZEELoad] 额外覆写字段: {args.patch}", flush=True)
     if args.launch_activity:
         print(f"[LAN-ZEELoad] launcherActivities -> {args.launch_activity}", flush=True)
+    if args.sign_cache:
+        print(f"[LAN-ZEELoad] 真签名缓存：{args.sign_cache}", flush=True)
     print(f"[LAN-ZEELoad] 启动 mitmdump (监听 127.0.0.1:{args.proxy_port})，日志目录 {out_dir}", flush=True)
     proc = subprocess.Popen(cmd)
     time.sleep(2)
