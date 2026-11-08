@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZEEload 车机控制台</title>
+<style>
+  body{background:#101418;color:#e8eef2;font-family:-apple-system,"Noto Sans CJK SC",sans-serif;margin:0;padding:20px}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:#8fa3ad;font-size:13px;margin-bottom:18px}
+  a.b{display:block;background:#1b2a33;border:1px solid #2c414d;border-radius:12px;padding:16px;margin:10px 0;
+      color:#e8eef2;text-decoration:font-size:17px;font-size:17px}
+  a.b small{display:block;color:#8fa3ad;font-size:12px;margin-top:4px;word-break:break-all}
+  #info{margin-top:20px;background:#0c1114;border:1px solid #223038;border-radius:10px;padding:12px;
+        font-size:12px;color:#8fa3ad;word-break:break-all;line-height:1.6}
+  .hit{border-color:#3fbf6a!important}
+</style>
+</head>
+<body>
+<h1>ZEEload 车机控制台</h1>
+<div class="sub">这些链接是浏览器导航里的条目能到的地方。点一下，Mac 那边就能看到浏览器有没有真的跳走。</div>
+
+<a class="b" href="intent://#Intent;action=android.settings.SETTINGS;end" onclick="tap('settings')">⚙ 系统设置（action 形式）
+  <small>intent://#Intent;action=android.settings.SETTINGS;end</small></a>
+
+<a class="b" href="intent://#Intent;action=android.settings.DEVELOPMENT_SETTINGS;end" onclick="tap('dev')">🧪 开发者选项（action 形式）
+  <small>intent://#Intent;action=android.settings.DEVELOPMENT_SETTINGS;end</small></a>
+
+<a class="b" href="intent://#Intent;action=android.settings.APPLICATION_SETTINGS;end" onclick="tap('apps')">📦 已安装应用列表
+  <small>intent://#Intent;action=android.settings.APPLICATION_SETTINGS;end</small></a>
+
+<a class="b" href="intent://#Intent;action=android.settings.MANAGE_UNKNOWN_APP_SOURCES;end" onclick="tap('unknown')">❓ 「安装未知应用」权限页
+  <small>intent://#Intent;action=android.settings.MANAGE_UNKNOWN_APP_SOURCES;end</small></a>
+
+<a class="b" href="intent://#Intent;component=com.android.settings/.Settings;end" onclick="tap('settings_component')">🧩 系统设置（component 形式）
+  <small>intent://#Intent;component=com.android.settings/.Settings;end</small></a>
+
+<a class="b" href="intent://#Intent;action=android.intent.action.VIEW;component=com.android.settings/.FallbackHome;end" onclick="tap('fallback')">🏠 兜底 Home（component 形式）
+  <small>component=com.android.settings/.FallbackHome</small></a>
+
+<div id="info">UA 读取中…</div>
+
+<script>
+// 每点一次：先发 tap:<名字>，再挂一个 1.5 秒的计时器发 still:<名字>。
+// 如果浏览器真的跳走了，页面被卸载 → Mac 只会看到 tap；看到 still 就说明没跳走。
+function beacon(q){ var i=new Image(); i.src='/beacon?'+q; }
+function tap(n){
+  beacon('tap='+n+'&ua='+encodeURIComponent(navigator.userAgent));
+  setTimeout(function(){ beacon('still='+n); }, 1500);
+}
+var ua=navigator.userAgent||'';
+var engine = /Chrom|Chrome\//.test(ua) ? 'Chromium 系（认 intent://）' : (/AppleWeb/.test(ua)?'WebKit/':'未知内核（intent:// 多半不认）');
+document.getElementById('info').innerHTML =
+  '内核判断：'+engine+'<br>'+
+  'userAgent：'+ua+'<br>'+
+  '屏幕：'+screen.width+'×'+screen.height+' · dpr '+window.devicePixelRatio+'<br>'+
+  'href：'+location.href;
+beacon('load&ua='+encodeURIComponent(ua)+'&wv='+(/; wv/.test(ua)?'1':'0'));
+</script>
+</body>
+</html>

@@ -87,6 +87,12 @@ class ZeekrLog:
             "调试用：把含 apkPackageName 的 JSON 响应里的 sha256/apkMd5 改写为等长伪造值",
         )
         loader.add_option(
+            "zeekr_nav_inject",
+            str,
+            "",
+            "往车机浏览器的导航/收藏里注入条目，格式 名称|URL（多条用 @@ 分隔）",
+        )
+        loader.add_option(
             "zeekr_inject_pkg",
             str,
             "",
@@ -334,7 +340,16 @@ class ZeekrLog:
             if bool(ctx.options.zeekr_log_req_body) and "json" in (req.headers.get("content-type") or "").lower():
                 body = req.get_text(strict=False) or ""
                 if body:
+                    # 完整请求体单独存盘：车机在 ota/update/appList 里会上报整机包列表，
+                    # 内联那份 1200 字的副本会被切掉，而它是判断「车上到底装过什么」的唯一依据。
                     rec["req_body"] = body[:1200]
+                    try:
+                        rp = os.path.join(self._dl_dir, f"{self._file_name(flow)}-req")
+                        with open(rp, "w", encoding="utf-8") as fh:
+                            fh.write(body)
+                        rec["req_body_path"] = rp
+                    except Exception:
+                        pass
             if "/app/signature" in req.path:
                 body = req.get_text(strict=False) or ""
                 try:
@@ -462,8 +477,48 @@ class ZeekrLog:
         )
         return out, "sign_rewritten_" + mode
 
+    def _inject_nav(self, flow: http.HTTPFlow, resp) -> dict | None:
+        """车机浏览器的「导航/收藏」是服务端下发的（browser-service），把条目插进去就等于
+        在车机浏览器里放一个我们指定的网址。用途：试 intent:// 深链——不装任何 APK
+        也可能把系统设置 / 安装器 / 工程模式拉起来。格式：名称|URL，多条用 @@ 分隔。"""
+        raw = (getattr(ctx.options, "zeekr_nav_inject", "") or "").strip()
+        if not raw:
+            return None
+        path = (flow.request.path or "").split("?")[0]
+        if not path.endswith(("/browser-service/api/v1/navigation", "/browser-service/api/v1/collection")) \
+                and "/browser-service/api/v1/" not in path:
+            return None
+        entries = []
+        for i, chunk in enumerate(x for x in raw.split("@@") if "|" in x):
+            name, _, url = chunk.partition("|")
+            entries.append({"id": f"zeeload{i}", "webName": name.strip()[:40], "webUrl": url.strip()})
+        if not entries:
+            return None
+        if resp.stream:
+            ctx.log.warn("zeekr_log: [nav] 响应是流式，未能注入导航")
+            return None
+        try:
+            data = json.loads(resp.get_content(strict=False) or b"{}")
+        except Exception:
+            return None
+        body = data.get("data")
+        lst = body.get("list") if isinstance(body, dict) else (body if isinstance(body, list) else None)
+        if not isinstance(lst, list):
+            return None
+        have = {str(e.get("webUrl")) for e in lst if isinstance(e, dict)}
+        added = [e for e in entries if e["webUrl"] not in have]
+        if not added:
+            return None
+        lst[0:0] = added
+        resp.set_content(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        ctx.log.warn("zeekr_log: [nav] 已向车机浏览器注入：" + "、".join(e["webName"] for e in added))
+        return {"body_saved": False, "nav_injected": [e["webUrl"] for e in added]}
+
     def _rewrite_body(self, flow: http.HTTPFlow, resp) -> dict | None:
         """在 response 阶段做等长改写（小 JSON 响应）。"""
+        nav = self._inject_nav(flow, resp)
+        if nav:
+            return nav
         want_hash = ctx.options.zeekr_fake_hash
         want_sign = ctx.options.zeekr_fake_sign
         override_sha = (ctx.options.zeekr_override_sha256 or "").strip().lower()

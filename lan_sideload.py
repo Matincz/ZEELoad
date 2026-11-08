@@ -42,6 +42,12 @@ def parse_args(argv=None):
     exp.add_argument("--patch", default="", help="额外覆写元数据字段（JSON 片段），例：\"publishType\":1,\"devType\":1")
     exp.add_argument("--launch-activity", default="", help="把 launcherActivities 改成任意组件（试「打开」按钮）")
     exp.add_argument(
+        "--nav",
+        action="append",
+        metavar="名称|URL",
+        help="往车机浏览器的导航/收藏里加一条（可重复）。例：--nav '系统设置|intent://#Intent;action=android.settings.SETTINGS;end'",
+    )
+    exp.add_argument(
         "--sign-cache",
         default="",
         help="真签名缓存文件（跳轮复用）。不指定的话缓存开在当轮目录里，重启服务就丢了",
@@ -179,6 +185,9 @@ def main() -> None:
         sets.append(f"zeekr_sign_cache={args.sign_cache}")
     if args.patch:
         sets.append(f"zeekr_patch_fields={args.patch}")
+    if getattr(args, "nav", None):
+        # 往车机浏览器导航/收藏里插条目（E10：intent:// 深链试拉起系统页面）
+        sets.append("zeekr_nav_inject=" + "@@".join(args.nav))
     cmd = [MITMDUMP, "--mode", "regular", "--emudhra", "--listen-host", "127.0.0.1",
            "--listen-port", str(args.proxy_port), "--set", "stream_large_bodies=2m", "-s", ADDON]
     for item in sets:
