@@ -153,8 +153,23 @@ for d in $DOMAINS; do
     bad "$d 还没指向本机：本机解析 [$(echo $got | tr '\n' ' ')] / 网关解析 [$(echo $gotgw | tr '\n' ' ')]"
   fi
 done
+# 本地 DNS 记录可能只下发到部分网络（车机和 Mac 不在同一个 VLAN 时就不同步），
+# 所以权威判据是：看看 443 上有没有非本机的连接进来了
+# 只数「本地端口是 443」的那些（否则会把自己机器连出去到别人 443 的连接也算进来）
+PEERS=$(netstat -an -p tcp 2>/dev/null | awk '$4 ~ /\.443$/ && $6 == "ESTABLISHED" {split($5,a,"."); if (length(a)==5) print a[1]"."a[2]"."a[3]"."a[4]}' | sort -u)
+OUTSIDE=""
+for p in $PEERS; do
+  case "$p" in 127.*|""|::*) continue ;; esac
+  echo "$MYIPS" | grep -qx "$p" || OUTSIDE="$OUTSIDE $p"
+done
+if [ -n "$OUTSIDE" ]; then
+  ok "443 上已有外部设备连进来：$(echo $OUTSIDE | tr '\n' ' ')（这才是劫持生效的硬证据）"
+  HIJACK=1
+fi
 if [ "$HIJACK" = 0 ]; then
-  say "  → 劫持没生效就别在车上点：商店会直接连真服务器，日志里什么都看不到。"
+  say "  → 也可能是本地记录只下发到车机那个网络（Mac 自己问不到很正常）。"
+  say "    权威判据：启服务后看日志里有没有 'SNI-443 收到来自 <车机IP>'；有就是通的。"
+  say "  → 若确实没生效，就别在车上点：商店会直接连真服务器，日志里什么都看不到。"
   say "    去 UniFi 把这些域名加一条 A 记录指到 $HINT_IP（并确认站点开了 Local DNS），"
   say "    加完重跑本脚本确认变 [ok]，再让车机去点商店。"
   say "    注：改写是整站点生效，手机上不信任我们证书的极氪 App 这段时间会连不上；跑完删记录即恢复。"
