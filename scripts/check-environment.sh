@@ -110,6 +110,57 @@ for d in $DOMAINS; do
 done
 
 say ""
+say "== LAN + UniFi DNS 劫持判据（当前主线：域名必须解析到本机）=="
+MYIPS=$(ifconfig 2>/dev/null | awk '/inet (192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)/{print $2}' | sort -u)
+GW=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2; exit}')
+[ -n "$GW" ] || GW=$(netstat -rn -f inet 2>/dev/null | awk '$1=="default"{print $2; exit}')
+# 本机常有好几个地址（虚拟网卡/容器网段），只有和网关同网段那个能被车机连到
+GWPREFIX=${GW%.*}
+SAME=""; OTHER=""
+if [ -n "$GWPREFIX" ]; then
+  SAME=$(echo "$MYIPS" | grep "^$GWPREFIX\." | tr '\n' ' ' | sed 's/ *$//')
+  OTHER=$(echo "$MYIPS" | grep -v "^$GWPREFIX\." | tr '\n' ' ' | sed 's/ *$//')
+fi
+# 默认路由那块网卡上的地址就是车机连过来的那个（lan_sideload 监听 0.0.0.0，所以同网段的其他地址也能用）
+DEF_IF=$(route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')
+PRIMARY=$(ifconfig "${DEF_IF:-none}" 2>/dev/null | awk '/inet /{print $2; exit}')
+case " $SAME " in
+  *" $PRIMARY "*) HINT_IP="$PRIMARY" ;;
+  *) HINT_IP=$(echo "$SAME" | awk '{print $1}'); [ -n "$HINT_IP" ] || HINT_IP=$(echo "$MYIPS" | awk 'NR==1') ;;
+esac
+say "  网关（车机的 DNS 服务器）：${GW:-未找到}"
+# 注：这里不用 ${VAR:+中文} 那种写法——C locale 下 bash 会把多字节字符的首字节当成变量名的一部分
+if [ -n "$SAME" ]; then
+  say "  本机可用地址（与网关同网段）：$SAME"
+else
+  say "  本机可用地址：一个也没有（本机不在网关网段上？）"
+fi
+[ -n "$PRIMARY" ] && say "      车机连过来的就是默认路由 $DEF_IF 上的 $PRIMARY"
+[ -n "$OTHER" ] && say "  其它网卡（虚拟网段，车机连不到）：$OTHER"
+HIJACK=1
+for d in $DOMAINS; do
+  got=$(dig +short +time=3 +tries=1 "$d" 2>/dev/null | grep -E '^[0-9]+\.' || true)
+  gotgw=""
+  [ -n "$GW" ] && gotgw=$(dig +short +time=3 +tries=1 @"$GW" "$d" 2>/dev/null | grep -E '^[0-9]+\.' || true)
+  hit=0
+  for a in $got $gotgw; do
+    echo "$MYIPS" | grep -qx "$a" && hit=1
+  done
+  if [ "$hit" = 1 ]; then
+    ok "$d 已解析到本机 → 车机流量会到我们"
+  else
+    HIJACK=0
+    bad "$d 还没指向本机：本机解析 [$(echo $got | tr '\n' ' ')] / 网关解析 [$(echo $gotgw | tr '\n' ' ')]"
+  fi
+done
+if [ "$HIJACK" = 0 ]; then
+  say "  → 劫持没生效就别在车上点：商店会直接连真服务器，日志里什么都看不到。"
+  say "    去 UniFi 把这些域名加一条 A 记录指到 $HINT_IP（并确认站点开了 Local DNS），"
+  say "    加完重跑本脚本确认变 [ok]，再让车机去点商店。"
+  say "    注：改写是整站点生效，手机上不信任我们证书的极氪 App 这段时间会连不上；跑完删记录即恢复。"
+fi
+
+say ""
 say "== 端口与进程 =="
 if command -v lsof >/dev/null 2>&1; then
   if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -117,6 +168,13 @@ if command -v lsof >/dev/null 2>&1; then
     lsof -nP -iTCP:"$PORT" -sTCP:LISTEN | sed 's/^/  /'
   else
     ok "端口 $PORT 空闲"
+  fi
+  # LAN 路线下车机直连 443，没人接就是白跑一轮
+  if lsof -nP -iTCP:443 -sTCP:LISTEN >/dev/null 2>&1; then
+    ok "端口 443 已有人监听（LAN 路线必需）："
+    lsof -nP -iTCP:443 -sTCP:LISTEN | sed 's/^/  /'
+  else
+    bad "端口 443 没人监听：LAN 路线下要先跑 lan_sideload.py 占住 443，否则劫持过来的连接会直接失败"
   fi
 fi
 pgrep -fl 'mitmdump' | sed 's/^/  /' || ok "没有运行中的 mitmdump"
